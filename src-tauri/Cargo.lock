@@ -526,6 +526,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "chardetng"
+version = "0.1.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14b8f0b65b7b08ae3c8187e8d77174de20cb6777864c6b832d8ad365999cf1ea"
+dependencies = [
+ "cfg-if",
+ "encoding_rs",
+ "memchr",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3845,15 +3856,19 @@ dependencies = [
 name = "takumi-vid-dl"
 version = "0.1.0"
 dependencies = [
+ "chardetng",
+ "encoding_rs",
  "env_logger",
  "log",
  "reqwest",
  "serde",
  "serde_json",
+ "shlex",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
  "time",
+ "tokio",
 ]
 
 [[package]]
@@ -4284,9 +4299,23 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
+ "tokio-macros",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e06d43f1345a3bcd39f6a56dbb7dcab2ba47e68e8ac134855e7e2bdbaf8cab8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.103",
 ]
 
 [[package]]
