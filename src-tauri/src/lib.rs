@@ -514,3 +514,306 @@ async fn run_yt_dlp(command_line: String, window: tauri::Window) -> Result<Strin
         Err(format!("yt-dlp failed with status: {}", status))
     }
 }
+
+/*
+// ffmpegを実行するコマンド
+#[tauri::command]
+async fn run_ffmpeg(
+    command_line: String,
+    window: tauri::Window,
+    dir: PathBuf,
+    output_ext: String,
+    output_dir: PathBuf,
+) -> Result<String, String> {
+    log::info!(
+        "Invoked run_ffmpeg with command_line: {:?}, dir: {:?}",
+        command_line,
+        dir
+    );
+
+    let ffmpeg_path = if dir.as_os_str().is_empty() {
+        // パス未指定の場合は環境変数PATHから検索
+        String::from("ffmpeg")
+    } else {
+        // 指定ディレクトリにffmpeg/ffprobeがあると仮定
+        let ffmpeg_name = match std::env::consts::OS {
+            "windows" => "ffmpeg.exe",
+            "macos" | "linux" => "ffmpeg",
+            other => {
+                log::error!("Unsupported OS: {}", other);
+                return Err(format!("Unsupported OS: {}", other));
+            }
+        };
+        dir.join(ffmpeg_name).to_string_lossy().to_string()
+    };
+
+    // 入力ファイルの取得
+    let tmp_dir = std::env::current_dir()
+        .map(|d| d.join("tmp"))
+        .map_err(|e| format!("Failed to get current dir: {}", e))?;
+    let input_file = fs::read_dir(&tmp_dir)
+        .map_err(|e| {
+            log::error!("Failed to read tmp directory: {}", e);
+            format!("Failed to read tmp dir: {}", e)
+        })?
+        .filter_map(|entry| entry.ok())
+        .find(|entry| {
+            entry.file_type()
+                .map(|ft| ft.is_file())
+                .unwrap_or(false)
+        })
+        .map(|entry| entry.path())
+        .ok_or_else(|| {
+            log::error!("No input file found in tmp directory: {:?}", tmp_dir);
+            "No file found in tmp directory".to_string()
+        })?;
+
+    // 入力ファイルのパスとファイル名
+    let input_file_path = input_file.to_string_lossy().to_string();
+    let input_file_name = input_file
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "Failed to get input file name".to_string())?
+        .to_string();
+
+    // 出力ファイルのパス
+    let output_file_name = format!(
+        "{}.{}",
+        input_file_name
+            .rsplitn(2, '.')
+            .nth(1) // lastではなくnth(1)を使用してベース名を取得
+            .unwrap_or(&input_file_name),
+        output_ext
+    );
+    let mut output_file_path = output_dir.join(&output_file_name);
+
+    // ファイルが既に存在する場合は連番を追加
+    let mut counter = 1;
+    while output_file_path.exists() {
+        let base_name = input_file_name
+            .rsplitn(2, '.')
+            .nth(1)
+            .unwrap_or(&input_file_name);
+        let new_name = format!("{}_{}.{}", base_name, counter, output_ext);
+        output_file_path = output_dir.join(new_name);
+        counter += 1;
+    }
+
+    let output_file_path_str = output_file_path.to_string_lossy().to_string();
+
+    // 出力ディレクトリの存在確認と作成
+    if !output_dir.exists() {
+        fs::create_dir_all(&output_dir).map_err(|e| {
+            log::error!("Failed to create output directory: {}", e);
+            format!("Failed to create output directory: {}", e)
+        })?;
+    }
+
+    // ユーザーの追加引数を安全にパース
+    let user_args = parse_command_line_safe(&command_line)?;
+    log::info!("Parsed user args: {:?}", user_args);
+
+    // 開始通知
+    let _ = window.emit("ffmpeg-started", ());
+
+    // 直接実行（シェルを使わない）
+    let mut cmd = Command::new(&ffmpeg_path);
+    cmd.arg("-i").arg(&input_file_path); // 入力ファイル
+    cmd.args(&user_args); // ユーザー引数
+    cmd.arg(&output_file_path_str); // 出力ファイル
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+
+    let mut child = cmd.spawn().map_err(|e| {
+        log::error!("Failed to run ffmpeg: {}", e);
+        let _ = window.emit("ffmpeg-error", format!("Failed to spawn ffmpeg: {}", e));
+        format!("Failed to run ffmpeg: {}", e)
+    })?;
+
+    // stdoutとstderrを取得
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+
+    let window_stdout = window.clone();
+    let window_stderr = window.clone();
+
+    // stdoutを非同期で読み取り、キャリッジリターンを考慮してフロントエンドに送信
+    let stdout_task = tokio::spawn(async move {
+        let mut detector = EncodingDetector::new();
+        let mut confirmed_encoding: Option<&'static encoding_rs::Encoding> = None;
+        let mut reader = stdout;
+        let mut buffer = [0; 4096];
+        let mut line_buffer = String::new();
+
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    // エンコーディングが確定していない場合のみ検出器を更新
+                    if confirmed_encoding.is_none() {
+                        detector.feed(&buffer[..n], false);
+                        let assessment = detector.guess_assess(None, true);
+                        if assessment.1 {
+                            // 確信度が高い場合
+                            confirmed_encoding = Some(assessment.0);
+                        }
+                    }
+
+                    // 確定したエンコーディングがあればそれを使用、なければguess
+                    let encoding = confirmed_encoding.unwrap_or_else(|| detector.guess(None, true));
+                    let (cow, _, had_errors) = encoding.decode(&buffer[..n]);
+                    let chunk = if had_errors {
+                        String::from_utf8_lossy(&buffer[..n]).to_string()
+                    } else {
+                        cow.to_string()
+                    };
+                    for ch in chunk.chars() {
+                        match ch {
+                            '\n' => {
+                                let _ = window_stdout.emit(
+                                    "ffmpeg-stdout",
+                                    serde_json::json!({
+                                        "content": line_buffer.clone(),
+                                        "overwrite": false
+                                    }),
+                                );
+                                line_buffer.clear();
+                            }
+                            '\r' => {
+                                let _ = window_stdout.emit(
+                                    "ffmpeg-stdout",
+                                    serde_json::json!({
+                                        "content": line_buffer.clone(),
+                                        "overwrite": true
+                                    }),
+                                );
+                                line_buffer.clear();
+                            }
+                            _ => {
+                                line_buffer.push(ch);
+                            }
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        // 最後に残った内容があれば送信
+        if !line_buffer.is_empty() {
+            let _ = window_stdout.emit(
+                "ffmpeg-stdout",
+                serde_json::json!({
+                    "content": line_buffer,
+                    "overwrite": false
+                }),
+            );
+        }
+    });
+
+    // stderrを非同期で読み取り、キャリッジリターンを考慮してフロントエンドに送信
+    let stderr_task = tokio::spawn(async move {
+        let mut detector = EncodingDetector::new();
+        let mut confirmed_encoding: Option<&'static encoding_rs::Encoding> = None;
+        let mut reader = stderr;
+        let mut buffer = [0; 4096];
+        let mut line_buffer = String::new();
+
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    // エンコーディングが確定していない場合のみ検出器を更新
+                    if confirmed_encoding.is_none() {
+                        detector.feed(&buffer[..n], false);
+                        let assessment = detector.guess_assess(None, true);
+                        if assessment.1 {
+                            // 確信度が高い場合
+                            confirmed_encoding = Some(assessment.0);
+                        }
+                    }
+
+                    // 確定したエンコーディングがあればそれを使用、なければguess
+                    let encoding = confirmed_encoding.unwrap_or_else(|| detector.guess(None, true));
+                    let (cow, _, had_errors) = encoding.decode(&buffer[..n]);
+                    let chunk = if had_errors {
+                        String::from_utf8_lossy(&buffer[..n]).to_string()
+                    } else {
+                        cow.to_string()
+                    };
+                    for ch in chunk.chars() {
+                        match ch {
+                            '\n' => {
+                                let _ = window_stderr.emit(
+                                    "ffmpeg-stderr",
+                                    serde_json::json!({
+                                        "content": line_buffer.clone(),
+                                        "overwrite": false
+                                    }),
+                                );
+                                line_buffer.clear();
+                            }
+                            '\r' => {
+                                let _ = window_stderr.emit(
+                                    "ffmpeg-stderr",
+                                    serde_json::json!({
+                                        "content": line_buffer.clone(),
+                                        "overwrite": true
+                                    }),
+                                );
+                                line_buffer.clear();
+                            }
+                            _ => {
+                                line_buffer.push(ch);
+                            }
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        // 最後に残った内容があれば送信
+        if !line_buffer.is_empty() {
+            let _ = window_stderr.emit(
+                "ffmpeg-stderr",
+                serde_json::json!({
+                    "content": line_buffer,
+                    "overwrite": false
+                }),
+            );
+        }
+    });
+
+    // プロセスの完了を待機
+    let status = child.wait().map_err(|e| {
+        log::error!("Failed to wait for ffmpeg: {}", e);
+        let _ = window.emit("ffmpeg-error", format!("Failed to wait for ffmpeg: {}", e));
+        format!("Failed to wait for ffmpeg: {}", e)
+    })?;
+
+    // タスクの完了を待機
+    let _ = tokio::join!(stdout_task, stderr_task);
+
+    if status.success() {
+        log::info!("ffmpeg executed successfully");
+
+        // tmpディレクトリの清掃
+        if let Err(e) = fs::remove_file(&input_file) {
+            log::warn!("Failed to clean up tmp file: {}", e);
+        }
+
+        let _ = window.emit("ffmpeg-completed", "success");
+        Ok("ffmpeg completed successfully".to_string())
+    } else {
+        log::error!("ffmpeg failed with status: {}", status);
+        let _ = window.emit("ffmpeg-completed", "failed");
+        Err(format!("ffmpeg failed with status: {}", status))
+    }
+}
+ */
