@@ -6,6 +6,8 @@ fn greet(name: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![greet])
