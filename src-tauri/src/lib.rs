@@ -20,6 +20,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             check_ffmpeg_ffprobe_version,
             download_latest_yt_dlp,
+            run_yt_dlp,
         ])
         .run(tauri::generate_context!())
         .expect("Failed to run Tauri application");
@@ -289,4 +290,227 @@ async fn download_latest_yt_dlp() -> Result<String, String> {
     })?;
     log::info!("yt-dlp download completed: {:?}", yt_dlp_file);
     Ok(format!("yt-dlp downloaded successfully: {:?}", yt_dlp_file))
+}
+
+// yt-dlpのコマンド（リアルタイム出力対応）
+#[tauri::command]
+async fn run_yt_dlp(command_line: String, window: tauri::Window) -> Result<String, String> {
+    log::info!("Invoked run_yt_dlp with command_line: {:?}", command_line);
+
+    // yt-dlpのパスを決定
+    let current_dir = std::env::current_dir().map_err(|e| {
+        log::error!("Failed to get current directory: {}", e);
+        e.to_string()
+    })?;
+    let yt_dlp_path = match std::env::consts::OS {
+        "windows" => current_dir.join("yt-dlp").join("yt-dlp.exe"),
+        "macos" => current_dir.join("yt-dlp").join("yt-dlp_macos"),
+        "linux" => current_dir.join("yt-dlp").join("yt-dlp_linux"),
+        other => {
+            log::error!("Unsupported OS: {}", other);
+            return Err(format!("Unsupported OS: {}", other));
+        }
+    };
+    log::info!("Using yt-dlp path: {:?}", yt_dlp_path);
+
+    // コマンドライン引数を安全にパース
+    let args = shlex::split(&command_line)
+        .ok_or_else(|| "Invalid command line syntax - failed to parse arguments".to_string())?;
+    log::info!("Parsed args: {:?}", args);
+
+    // 開始通知
+    let _ = window.emit("yt-dlp-started", ());
+
+    // 直接実行（シェルを使わない）
+    let mut cmd = Command::new(&yt_dlp_path);
+    cmd.args(&args);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+
+    let mut child = cmd.spawn().map_err(|e| {
+        log::error!("Failed to run yt-dlp: {}", e);
+        let _ = window.emit("yt-dlp-error", format!("Failed to spawn yt-dlp: {}", e));
+        format!("Failed to run yt-dlp: {}", e)
+    })?;
+
+    // stdoutとstderrを取得
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+
+    let window_stdout = window.clone();
+    let window_stderr = window.clone();
+
+    // stdoutを非同期で読み取り、キャリッジリターンを考慮してフロントエンドに送信
+    let stdout_task = tokio::spawn(async move {
+        let mut detector = EncodingDetector::new();
+        let mut confirmed_encoding: Option<&'static encoding_rs::Encoding> = None;
+        let mut reader = stdout;
+        let mut buffer = [0; 4096];
+        let mut line_buffer = String::new();
+
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    // エンコーディングが確定していない場合のみ検出器を更新
+                    if confirmed_encoding.is_none() {
+                        detector.feed(&buffer[..n], false);
+                        let assessment = detector.guess_assess(None, true);
+                        if assessment.1 {
+                            // 確信度が高い場合
+                            confirmed_encoding = Some(assessment.0);
+                        }
+                    }
+
+                    // 確定したエンコーディングがあればそれを使用、なければguess
+                    let encoding = confirmed_encoding.unwrap_or_else(|| detector.guess(None, true));
+                    let (cow, _, had_errors) = encoding.decode(&buffer[..n]);
+                    let chunk = if had_errors {
+                        // 判別失敗や壊れた部分があればUTF-8で再デコード（置換文字で埋める）
+                        String::from_utf8_lossy(&buffer[..n]).to_string()
+                    } else {
+                        cow.to_string()
+                    };
+                    for ch in chunk.chars() {
+                        match ch {
+                            '\n' => {
+                                let _ = window_stdout.emit(
+                                    "yt-dlp-stdout",
+                                    serde_json::json!({
+                                        "content": line_buffer.clone(),
+                                        "overwrite": false
+                                    }),
+                                );
+                                line_buffer.clear();
+                            }
+                            '\r' => {
+                                let _ = window_stdout.emit(
+                                    "yt-dlp-stdout",
+                                    serde_json::json!({
+                                        "content": line_buffer.clone(),
+                                        "overwrite": true
+                                    }),
+                                );
+                                line_buffer.clear();
+                            }
+                            _ => {
+                                line_buffer.push(ch);
+                            }
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        // 最後に残った内容があれば送信
+        if !line_buffer.is_empty() {
+            let _ = window_stdout.emit(
+                "yt-dlp-stdout",
+                serde_json::json!({
+                    "content": line_buffer,
+                    "overwrite": false
+                }),
+            );
+        }
+    });
+
+    // stderrを非同期で読み取り、キャリッジリターンを考慮してフロントエンドに送信
+    let stderr_task = tokio::spawn(async move {
+        let mut detector = EncodingDetector::new();
+        let mut confirmed_encoding: Option<&'static encoding_rs::Encoding> = None;
+        let mut reader = stderr;
+        let mut buffer = [0; 4096];
+        let mut line_buffer = String::new();
+
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    // エンコーディングが確定していない場合のみ検出器を更新
+                    if confirmed_encoding.is_none() {
+                        detector.feed(&buffer[..n], false);
+                        let assessment = detector.guess_assess(None, true);
+                        if assessment.1 {
+                            // 確信度が高い場合
+                            confirmed_encoding = Some(assessment.0);
+                        }
+                    }
+
+                    // 確定したエンコーディングがあればそれを使用、なければguess
+                    let encoding = confirmed_encoding.unwrap_or_else(|| detector.guess(None, true));
+                    let (cow, _, had_errors) = encoding.decode(&buffer[..n]);
+                    let chunk = if had_errors {
+                        String::from_utf8_lossy(&buffer[..n]).to_string()
+                    } else {
+                        cow.to_string()
+                    };
+                    for ch in chunk.chars() {
+                        match ch {
+                            '\n' => {
+                                let _ = window_stderr.emit(
+                                    "yt-dlp-stderr",
+                                    serde_json::json!({
+                                        "content": line_buffer.clone(),
+                                        "overwrite": false
+                                    }),
+                                );
+                                line_buffer.clear();
+                            }
+                            '\r' => {
+                                let _ = window_stderr.emit(
+                                    "yt-dlp-stderr",
+                                    serde_json::json!({
+                                        "content": line_buffer.clone(),
+                                        "overwrite": true
+                                    }),
+                                );
+                                line_buffer.clear();
+                            }
+                            _ => {
+                                line_buffer.push(ch);
+                            }
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        // 最後に残った内容があれば送信
+        if !line_buffer.is_empty() {
+            let _ = window_stderr.emit(
+                "yt-dlp-stderr",
+                serde_json::json!({
+                    "content": line_buffer,
+                    "overwrite": false
+                }),
+            );
+        }
+    });
+
+    // プロセスの完了を待機
+    let status = child.wait().map_err(|e| {
+        log::error!("Failed to wait for yt-dlp: {}", e);
+        let _ = window.emit("yt-dlp-error", format!("Failed to wait for yt-dlp: {}", e));
+        format!("Failed to wait for yt-dlp: {}", e)
+    })?;
+
+    // タスクの完了を待機
+    let _ = tokio::join!(stdout_task, stderr_task);
+
+    if status.success() {
+        log::info!("yt-dlp executed successfully");
+        let _ = window.emit("yt-dlp-completed", "success");
+        Ok("yt-dlp completed successfully".to_string())
+    } else {
+        log::error!("yt-dlp failed with status: {}", status);
+        let _ = window.emit("yt-dlp-completed", "failed");
+        Err(format!("yt-dlp failed with status: {}", status))
+    }
 }
