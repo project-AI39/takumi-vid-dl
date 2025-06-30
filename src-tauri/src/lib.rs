@@ -1,9 +1,14 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
+use chardetng::EncodingDetector;
+use reqwest;
+use serde_json;
+use shlex;
+use std::fs;
+use std::io::Read;
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use tauri::Emitter;
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // env_logger::init();
