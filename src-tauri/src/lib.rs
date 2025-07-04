@@ -81,83 +81,76 @@ async fn write_urls_to_file(urls: String) -> Result<String, String> {
 
 // ffmpegとffprobeのバージョンを確認するコマンド
 #[tauri::command]
-async fn check_ffmpeg_ffprobe_version(dir: PathBuf) -> Result<String, String> {
+async fn check_ffmpeg_ffprobe_version(dir: String) -> Result<String, String> {
     log::info!("Invoked check_ffmpeg_ffprobe_version with dir: {:?}", dir);
 
-    let (ffmpeg_path, ffprobe_path) = if dir.as_os_str().is_empty() {
-        // パス未指定の場合は環境変数PATHから検索
+    let (ffmpeg_path, ffprobe_path) = if dir.trim().is_empty() {
+        // 環境変数から検索
         (String::from("ffmpeg"), String::from("ffprobe"))
     } else {
-        // 指定ディレクトリにffmpeg/ffprobeがあると仮定
+        // 指定ディレクトリから検索
         let ffmpeg_name = match std::env::consts::OS {
             "windows" => "ffmpeg.exe",
-            "macos" | "linux" => "ffmpeg",
-            other => {
-                log::error!("Unsupported OS: {}", other);
-                return Err(format!("Unsupported OS: {}", other));
-            }
+            _ => "ffmpeg",
         };
         let ffprobe_name = match std::env::consts::OS {
             "windows" => "ffprobe.exe",
-            "macos" | "linux" => "ffprobe",
-            other => {
-                log::error!("Unsupported OS: {}", other);
-                return Err(format!("Unsupported OS: {}", other));
-            }
+            _ => "ffprobe",
         };
+        let dir_path = PathBuf::from(&dir);
         (
-            dir.join(ffmpeg_name).to_string_lossy().to_string(),
-            dir.join(ffprobe_name).to_string_lossy().to_string(),
+            dir_path.join(ffmpeg_name).to_string_lossy().to_string(),
+            dir_path.join(ffprobe_name).to_string_lossy().to_string(),
         )
     };
 
     // ffmpegのバージョン取得
-    let ffmpeg_output = {
+    let ffmpeg_result = {
         let mut cmd = Command::new(&ffmpeg_path);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x08000000);
         }
-        cmd.arg("-version").output()
+        match cmd.arg("-version").output() {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                format!("ffmpeg version:\n{}", stdout)
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("ffmpeg error: {}", stderr));
+            }
+            Err(e) => {
+                return Err(format!("Failed to launch ffmpeg: {}", e));
+            }
+        }
     };
 
     // ffprobeのバージョン取得
-    let ffprobe_output = {
+    let ffprobe_result = {
         let mut cmd = Command::new(&ffprobe_path);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x08000000);
         }
-        cmd.arg("-version").output()
-    };
-
-    let ffmpeg_result = match ffmpeg_output {
+        match cmd.arg("-version").output() {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            format!("ffmpeg version:\n{}", stdout)
+                format!("ffprobe version:\n{}", stdout)
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            format!("ffmpeg error:\n{}", stderr)
+                return Err(format!("ffprobe error: {}", stderr));
         }
-        Err(e) => format!("Failed to launch ffmpeg: {}", e),
+            Err(e) => {
+                return Err(format!("Failed to launch ffprobe: {}", e));
+            }
+        }
     };
 
-    let ffprobe_result = match ffprobe_output {
-        Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            format!("ffprobe version:\n{}", stdout)
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            format!("ffprobe error:\n{}", stderr)
-        }
-        Err(e) => format!("Failed to launch ffprobe: {}", e),
-    };
-
-    // 両方の結果をまとめて返す
+    // 両方とも成功した場合のみ結果を返す
     Ok(format!("{}\n{}", ffmpeg_result, ffprobe_result))
 }
 
