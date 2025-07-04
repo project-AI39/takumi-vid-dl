@@ -1,3 +1,4 @@
+/*
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     CssBaseline,
@@ -367,3 +368,4 @@ const LogView: React.FC<LogViewProps> = ({ log, isProcessing, onReset }) => (
 );
 
 export default App;
+*/
