@@ -94,7 +94,7 @@ async fn check_ffmpeg_ffprobe_version(dir: String) -> Result<String, String> {
             _ => "ffmpeg",
         };
         let ffprobe_name = match std::env::consts::OS {
-            "windows" => "ffprobe.exe",
+            "windows" => "ffprobe.exe", 
             _ => "ffprobe",
         };
         let dir_path = PathBuf::from(&dir);
@@ -136,14 +136,14 @@ async fn check_ffmpeg_ffprobe_version(dir: String) -> Result<String, String> {
             cmd.creation_flags(0x08000000);
         }
         match cmd.arg("-version").output() {
-        Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
                 format!("ffprobe version:\n{}", stdout)
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(format!("ffprobe error: {}", stderr));
-        }
+            }
             Err(e) => {
                 return Err(format!("Failed to launch ffprobe: {}", e));
             }
@@ -158,9 +158,6 @@ async fn check_ffmpeg_ffprobe_version(dir: String) -> Result<String, String> {
 #[tauri::command]
 async fn download_latest_yt_dlp() -> Result<String, String> {
     log::info!("Starting download_latest_yt_dlp");
-
-    // HTTPクライアントの初期化
-    let client = reqwest::Client::new();
 
     // カレントディレクトリを取得
     let current_dir = std::env::current_dir().map_err(|e| {
@@ -185,6 +182,22 @@ async fn download_latest_yt_dlp() -> Result<String, String> {
     };
     let yt_dlp_file = save_dir.join(asset_name);
     let release_time_file = save_dir.join("release-time.txt");
+    let last_check_file = save_dir.join("last-check-time.txt");
+
+    // 最後の確認時間をチェック
+    let last_check_time = fs::read_to_string(&last_check_file)
+        .ok()
+        .and_then(|s| OffsetDateTime::parse(&s.trim(), &Rfc3339).ok());
+    
+    if let Some(last_check) = last_check_time {
+        let now = OffsetDateTime::now_utc();
+        let one_hour = time::Duration::hours(1);
+        
+        if now - last_check < one_hour {
+            log::info!("Last check was less than 1 hour ago, skipping server check");
+            return Ok("yt-dlp is up to date (last checked less than 1 hour ago)".to_string());
+        }
+    }
 
     // 既存のyt-dlpのバージョンを確認
     let yt_dlp_version_output = {
@@ -209,17 +222,8 @@ async fn download_latest_yt_dlp() -> Result<String, String> {
         }
     };
 
-    // release-time.txtから既存バイナリのリリース時間を取得
-    let local_binary_release_time = match fs::read_to_string(&release_time_file) {
-        Ok(content) => {
-            log::info!("Successfully read release-time.txt: {}", content);
-            Some(content.trim().to_string())
-        }
-        Err(e) => {
-            log::warn!("Could not read release-time.txt: {}", e);
-            None
-        }
-    };
+    // HTTPクライアントの初期化
+    let client = reqwest::Client::new();
 
     // GitHub APIから最新のリリース時間を取得
     let api_url = "https://api.github.com/repos/yt-dlp/yt-dlp-nightly-builds/releases/latest";
@@ -249,15 +253,33 @@ async fn download_latest_yt_dlp() -> Result<String, String> {
     };
 
     // local_binary_release_timeとgithub_latest_release_timeを比較して更新が必要か確認
+    let local_binary_release_time = fs::read_to_string(&release_time_file).ok();
     let local = local_binary_release_time
         .as_deref()
-        .and_then(|s| OffsetDateTime::parse(s, &Rfc3339).ok());
+        .and_then(|s| OffsetDateTime::parse(s.trim(), &Rfc3339).ok());
     let github = github_latest_release_time
         .as_str()
         .and_then(|s| OffsetDateTime::parse(s, &Rfc3339).ok());
     if let (Some(local), Some(github)) = (local, github) {
         if local >= github && yt_dlp_version_output.is_some() {
             log::info!("yt-dlp is already up to date");
+            
+            // サーバーチェック完了時刻を記録（最新版確認済み）
+            let current_time = OffsetDateTime::now_utc();
+            let current_time_str = current_time.format(&Rfc3339).map_err(|e| {
+                log::error!("Failed to format current time: {}", e);
+                format!("Failed to format current time: {}", e)
+            })?;
+            
+            let mut check_file = fs::File::create(&last_check_file).map_err(|e| {
+                log::error!("Could not create last-check-time.txt: {}", e);
+                format!("Could not create last-check-time.txt: {}", e)
+            })?;
+            check_file.write_all(current_time_str.as_bytes()).map_err(|e| {
+                log::error!("Failed to write last-check-time.txt: {}", e);
+                format!("Failed to write last-check-time.txt: {}", e)
+            })?;
+            
             return Ok("yt-dlp is already up to date.".to_string());
         }
     }
@@ -334,6 +356,23 @@ async fn download_latest_yt_dlp() -> Result<String, String> {
         log::error!("Failed to write release-time.txt: {}", e);
         format!("Failed to write release-time.txt: {}", e)
     })?;
+
+    // 全処理が成功した場合のみlast-check-time.txtに現在時刻を書き込み
+    let current_time = OffsetDateTime::now_utc();
+    let current_time_str = current_time.format(&Rfc3339).map_err(|e| {
+        log::error!("Failed to format current time: {}", e);
+        format!("Failed to format current time: {}", e)
+    })?;
+    
+    let mut check_file = fs::File::create(&last_check_file).map_err(|e| {
+        log::error!("Could not create last-check-time.txt: {}", e);
+        format!("Could not create last-check-time.txt: {}", e)
+    })?;
+    check_file.write_all(current_time_str.as_bytes()).map_err(|e| {
+        log::error!("Failed to write last-check-time.txt: {}", e);
+        format!("Failed to write last-check-time.txt: {}", e)
+    })?;
+
     log::info!("yt-dlp download completed: {:?}", yt_dlp_file);
     Ok(format!("yt-dlp downloaded successfully: {:?}", yt_dlp_file))
 }
