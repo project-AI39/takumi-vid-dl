@@ -441,7 +441,7 @@ async fn run_yt_dlp(command_line: String, window: tauri::Window) -> Result<Strin
     // stdoutを非同期で読み取り、キャリッジリターンを考慮してフロントエンドに送信
     let stdout_task = tokio::spawn(async move {
         let mut detector = EncodingDetector::new();
-        let mut confirmed_encoding: Option<&'static encoding_rs::Encoding> = None;
+        // confirmed_encodingは使わず、毎回detector.guessで判定する
         let mut reader = stdout;
         let mut buffer = [0; 4096];
         let mut line_buffer = String::new();
@@ -450,18 +450,11 @@ async fn run_yt_dlp(command_line: String, window: tauri::Window) -> Result<Strin
             match reader.read(&mut buffer) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
-                    // エンコーディングが確定していない場合のみ検出器を更新
-                    if confirmed_encoding.is_none() {
+                    // 毎回検出器を更新
                         detector.feed(&buffer[..n], false);
-                        let assessment = detector.guess_assess(None, true);
-                        if assessment.1 {
-                            // 確信度が高い場合
-                            confirmed_encoding = Some(assessment.0);
-                        }
-                    }
 
-                    // 確定したエンコーディングがあればそれを使用、なければguess
-                    let encoding = confirmed_encoding.unwrap_or_else(|| detector.guess(None, true));
+                    // 毎回guessでエンコーディングを判定
+                    let encoding = detector.guess(None, true);
                     let (cow, _, had_errors) = encoding.decode(&buffer[..n]);
                     let chunk = if had_errors {
                         // 判別失敗や壊れた部分があればUTF-8で再デコード（置換文字で埋める）
@@ -516,7 +509,7 @@ async fn run_yt_dlp(command_line: String, window: tauri::Window) -> Result<Strin
     // stderrを非同期で読み取り、キャリッジリターンを考慮してフロントエンドに送信
     let stderr_task = tokio::spawn(async move {
         let mut detector = EncodingDetector::new();
-        let mut confirmed_encoding: Option<&'static encoding_rs::Encoding> = None;
+        // confirmed_encodingは使わず、毎回detector.guessで判定する
         let mut reader = stderr;
         let mut buffer = [0; 4096];
         let mut line_buffer = String::new();
@@ -525,18 +518,11 @@ async fn run_yt_dlp(command_line: String, window: tauri::Window) -> Result<Strin
             match reader.read(&mut buffer) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
-                    // エンコーディングが確定していない場合のみ検出器を更新
-                    if confirmed_encoding.is_none() {
+                    // 毎回検出器を更新
                         detector.feed(&buffer[..n], false);
-                        let assessment = detector.guess_assess(None, true);
-                        if assessment.1 {
-                            // 確信度が高い場合
-                            confirmed_encoding = Some(assessment.0);
-                        }
-                    }
 
-                    // 確定したエンコーディングがあればそれを使用、なければguess
-                    let encoding = confirmed_encoding.unwrap_or_else(|| detector.guess(None, true));
+                    // 毎回guessでエンコーディングを判定
+                    let encoding = detector.guess(None, true);
                     let (cow, _, had_errors) = encoding.decode(&buffer[..n]);
                     let chunk = if had_errors {
                         String::from_utf8_lossy(&buffer[..n]).to_string()
