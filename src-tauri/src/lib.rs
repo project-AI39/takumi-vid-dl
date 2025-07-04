@@ -74,7 +74,11 @@ async fn write_urls_to_file(urls: String) -> Result<String, String> {
     }
 
     let file_path = urls_file.to_string_lossy().to_string();
-    log::info!("URLs file created/updated: {:?} with {} URLs", file_path, cleaned_urls.len());
+    log::info!(
+        "URLs file created/updated: {:?} with {} URLs",
+        file_path,
+        cleaned_urls.len()
+    );
 
     Ok(file_path)
 }
@@ -275,7 +279,9 @@ async fn download_latest_yt_dlp() -> Result<String, String> {
                 log::error!("Could not create last-check-time.txt: {}", e);
                 format!("Could not create last-check-time.txt: {}", e)
             })?;
-            check_file.write_all(current_time_str.as_bytes()).map_err(|e| {
+            check_file
+                .write_all(current_time_str.as_bytes())
+                .map_err(|e| {
                 log::error!("Failed to write last-check-time.txt: {}", e);
                 format!("Failed to write last-check-time.txt: {}", e)
             })?;
@@ -368,7 +374,9 @@ async fn download_latest_yt_dlp() -> Result<String, String> {
         log::error!("Could not create last-check-time.txt: {}", e);
         format!("Could not create last-check-time.txt: {}", e)
     })?;
-    check_file.write_all(current_time_str.as_bytes()).map_err(|e| {
+    check_file
+        .write_all(current_time_str.as_bytes())
+        .map_err(|e| {
         log::error!("Failed to write last-check-time.txt: {}", e);
         format!("Failed to write last-check-time.txt: {}", e)
     })?;
