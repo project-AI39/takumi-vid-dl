@@ -22,9 +22,61 @@ pub fn run() {
             check_ffmpeg_ffprobe_version,
             download_latest_yt_dlp,
             run_yt_dlp,
+            write_urls_to_file,
         ])
         .run(tauri::generate_context!())
         .expect("Failed to run Tauri application");
+}
+
+// URLsをファイルに書き込み、ファイルパスをリターン
+#[tauri::command]
+async fn write_urls_to_file(urls: String) -> Result<String, String> {
+    log::info!("Invoked write_urls_to_file with urls: {:?}", urls);
+
+    // カレントディレクトリを取得
+    let current_dir = std::env::current_dir().map_err(|e| {
+        log::error!("Could not get current directory: {}", e);
+        format!("Could not get current directory: {}", e)
+    })?;
+
+    // yt-dlpディレクトリを使用（release-time.txt、last-check-time.txtと同じ場所）
+    let save_dir = current_dir.join("yt-dlp");
+    fs::create_dir_all(&save_dir).map_err(|e| {
+        log::error!("Could not create yt-dlp directory: {}", e);
+        format!("Could not create yt-dlp directory: {}", e)
+    })?;
+
+    // 固定のファイル名を使用（上書き）
+    let urls_file = save_dir.join("url-list.txt");
+
+    // URLsを改行で分割し、空行を除去してファイルに書き込み
+    let cleaned_urls: Vec<&str> = urls
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    if cleaned_urls.is_empty() {
+        log::error!("No valid URLs provided");
+        return Err("No valid URLs provided".to_string());
+    }
+
+    let mut file = fs::File::create(&urls_file).map_err(|e| {
+        log::error!("Could not create URLs file: {}", e);
+        format!("Could not create URLs file: {}", e)
+    })?;
+
+    for url in &cleaned_urls {
+        writeln!(file, "{}", url).map_err(|e| {
+            log::error!("Failed to write URL to file: {}", e);
+            format!("Failed to write URL to file: {}", e)
+        })?;
+    }
+
+    let file_path = urls_file.to_string_lossy().to_string();
+    log::info!("URLs file created/updated: {:?} with {} URLs", file_path, cleaned_urls.len());
+
+    Ok(file_path)
 }
 
 // ffmpegとffprobeのバージョンを確認するコマンド
