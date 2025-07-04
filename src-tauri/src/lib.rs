@@ -16,6 +16,7 @@ pub fn run() {
     // env_logger::init();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             check_ffmpeg_ffprobe_version,
