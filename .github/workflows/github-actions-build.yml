@@ -1,88 +1,203 @@
-name: "Tauri V2 Build" # ワークフロー名
+name: Tauri Build and Release
 
 on:
   workflow_dispatch:
-    inputs:
-      build_type:
-        description: "Build type" # ビルドタイプ（release/debug）
-        required: true
-        type: choice
-        options:
-          - release
-          - debug
-        default: release
-      target_platforms:
-        description: "Target platforms (comma-separated)" # 対象プラットフォーム（カンマ区切り）
-        required: true
-        type: string
-        default: "windows-latest,ubuntu-22.04,macos-latest"
-      create_release:
-        description: "Create GitHub release" # GitHubリリースを作成するか
-        required: false
-        type: boolean
-        default: true
-      release_name:
-        description: "Release name (if creating release)" # リリース名
-        required: false
-        type: string
-        default: "App v__VERSION__"
 
 jobs:
   build:
-    permissions:
-      contents: write # リリース作成のためwrite権限が必要
     strategy:
-      fail-fast: false # どれか失敗しても他は継続
+      fail-fast: false
       matrix:
         include:
-          - platform: "windows-latest" # Windows用
-            args: ""
-            target: ""
-          - platform: "ubuntu-22.04" # Ubuntu用
-            args: ""
-            target: ""
-          - platform: "macos-latest" # macOS x86_64用
-            args: "--target x86_64-apple-darwin"
-            target: "x86_64-apple-darwin"
-          - platform: "macos-latest" # macOS Apple Silicon用
-            args: "--target aarch64-apple-darwin"
-            target: "aarch64-apple-darwin"
+          - platform: macos-latest
+            arch: aarch64-apple-darwin
+            name: macOS-ARM64
+          - platform: macos-latest
+            arch: x86_64-apple-darwin
+            name: macOS-x64
+          - platform: ubuntu-22.04
+            arch: ""
+            name: Linux-x64
+          - platform: windows-latest
+            arch: ""
+            name: Windows-x64
 
-    runs-on: ${{ matrix.platform }} # 各プラットフォームで実行
+    runs-on: ${{ matrix.platform }}
 
     steps:
-      - name: Checkout repository # リポジトリをチェックアウト
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js # Node.jsセットアップ
-        uses: actions/setup-node@v4
-        with:
-          node-version: "lts/*"
-          cache: "npm"
-
-      - name: Install Rust toolchain # Rustツールチェーンインストール
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target || '' }}
-
-      - name: Install system dependencies (Ubuntu only) # Ubuntuのみ依存パッケージインストール
+      - name: Install dependencies (Ubuntu only)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - name: Install frontend dependencies # フロントエンド依存インストール
-        run: npm install
+          sudo apt-get install -y \
+            libwebkit2gtk-4.0-dev \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
 
-      - name: Build and release Tauri app # Tauriアプリのビルド＆リリース
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          projectPath: "."
-          includeDebug: ${{ github.event.inputs.build_type == 'debug' }}
-          includeRelease: ${{ github.event.inputs.build_type == 'release' }}
-          args: ${{ matrix.args }}
-          tagName: ${{ github.event.inputs.create_release && github.event.inputs.release_name || '' }}
-          releaseName: ${{ github.event.inputs.create_release && github.event.inputs.release_name || '' }}
-          releaseBody: "Built with workflow_dispatch trigger"
-          releaseDraft: true
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+          key: ${{ matrix.platform }}-${{ matrix.arch }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build with Tauri Action
+        uses: tauri-apps/tauri-action@v0
+        with:
+          args: >
+            ${{ matrix.arch && format('--target {0}', matrix.arch) || '' }}
+        env:
+          TAURI_BUILD_TARGET: ${{ matrix.arch }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Collect build artifacts
+        shell: bash
+        run: |
+          set -e
+          mkdir -p upload
+
+          echo "=== Starting artifact collection ==="
+
+          # Windows artifacts
+          if [[ "${{ matrix.platform }}" == "windows-latest" ]]; then
+            echo "Collecting Windows artifacts..."
+            find src-tauri/target/release -maxdepth 1 -name "*.exe" -type f | while read exe; do
+              base=$(basename "$exe" .exe)
+              cp "$exe" "upload/${base}-x64.exe"
+            done || echo "No .exe files found"
+            find src-tauri/target/release/bundle -name "*.msi" -type f -exec cp {} upload/ \; 2>/dev/null || echo "No .msi files found"
+            find src-tauri/target/release/bundle -name "*-setup.exe" -type f -exec cp {} upload/ \; 2>/dev/null || echo "No NSIS files found"
+          fi
+            # macOS artifacts
+            if [[ "${{ matrix.platform }}" == "macos-latest" ]]; then
+            echo "Collecting macOS artifacts for ${{ matrix.arch }}..."
+            # .dmg
+            find src-tauri/target -name "*.dmg" -type f | while read dmg; do
+              arch="${{ matrix.arch }}"
+              base=$(basename "$dmg" .dmg)
+              cp "$dmg" "upload/${base}-${arch}.dmg"
+            done || echo "No .dmg files found"
+            # .app.tar.gz 既存
+            find src-tauri/target -name "*.app.tar.gz" -type f | while read tgz; do
+              arch="${{ matrix.arch }}"
+              base=$(basename "$tgz" .app.tar.gz)
+              cp "$tgz" "upload/${base}-${arch}.app.tar.gz"
+            done || echo "No .app.tar.gz files found"
+            # .app から .app.tar.gz を作成（なければ）
+            find src-tauri/target -name "*.app" -type d | while read appdir; do
+              arch="${{ matrix.arch }}"
+              base=$(basename "$appdir" .app)
+              renamed="upload/${base}-${arch}.app"
+              # ディレクトリをコピー＆リネーム
+              cp -R "$appdir" "$renamed"
+              out="upload/${base}-${arch}.app.tar.gz"
+              if [ ! -f "$out" ]; then
+                echo "Creating $out from $renamed"
+                tar -czf "$out" -C "$(dirname "$renamed")" "$(basename "$renamed")"
+              fi
+            done
+            fi
+
+          # Linux artifacts
+          if [[ "${{ matrix.platform }}" == "ubuntu-22.04" ]]; then
+            echo "Collecting Linux artifacts..."
+            find src-tauri/target -name "*.deb" -type f -exec cp {} upload/ \; 2>/dev/null || echo "No .deb files found"
+            find src-tauri/target -name "*.AppImage" -type f -exec cp {} upload/ \; 2>/dev/null || echo "No .AppImage files found"
+            find src-tauri/target -name "*.rpm" -type f -exec cp {} upload/ \; 2>/dev/null || echo "No .rpm files found"
+          fi
+
+          echo "=== Artifact collection completed ==="
+          echo "Contents of upload directory:"
+          ls -la upload/
+
+          if [ -z "$(ls -A upload/)" ]; then
+            echo "ERROR: No artifacts were collected"
+            echo "Build output structure:"
+            find src-tauri/target -type f -name "*" | head -20
+            exit 1
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: upload/
+          if-no-files-found: error
+
+  create-release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: find artifacts -type f | sort
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+
+          # Windows
+          find artifacts -name "*.exe" -type f | sort | while read f; do cp "$f" release-assets/; done || echo "No .exe files found"
+          find artifacts -name "*.msi" -type f | sort | while read f; do cp "$f" release-assets/; done || echo "No .msi files found"
+          find artifacts -name "*-setup.exe" -type f | sort | while read f; do cp "$f" release-assets/; done || echo "No setup.exe files found"
+
+          # macOS
+          find artifacts -name "*.dmg" -type f | sort | while read f; do cp "$f" release-assets/; done || echo "No .dmg files found"
+          find artifacts -name "*.app.tar.gz" -type f | sort | while read f; do cp "$f" release-assets/; done || echo "No .app.tar.gz files found"
+
+          # Linux
+          find artifacts -name "*.deb" -type f | sort | while read f; do cp "$f" release-assets/; done || echo "No .deb files found"
+          find artifacts -name "*.AppImage" -type f | sort | while read f; do cp "$f" release-assets/; done || echo "No .AppImage files found"
+          find artifacts -name "*.rpm" -type f | sort | while read f; do cp "$f" release-assets/; done || echo "No .rpm files found"
+
+          echo "=== Contents of release-assets/ ==="
+          ls -la release-assets/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ github.run_number }}"
+          name: "Release v${{ github.run_number }}"
+          body: |
+            Automated release created by GitHub Actions
+
+            ## Changes
+            - Built from commit: ${{ github.sha }}
+            - Workflow run: ${{ github.run_number }}
+
+            ## Downloads
+            - **Windows**: `.exe` (portable), `.msi` (installer), `-setup.exe` (NSIS)
+            - **macOS**: `.dmg` (disk image), `.app.tar.gz` (compressed app bundle)
+            - **Linux**: `.deb`, `.AppImage`, `.rpm`
+          draft: true
+          prerelease: false
+          files: release-assets/*
+          token: ${{ secrets.GITHUB_TOKEN }}
