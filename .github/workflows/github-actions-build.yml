@@ -1,0 +1,88 @@
+name: "Tauri V2 Build" # ワークフロー名
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build type" # ビルドタイプ（release/debug）
+        required: true
+        type: choice
+        options:
+          - release
+          - debug
+        default: release
+      target_platforms:
+        description: "Target platforms (comma-separated)" # 対象プラットフォーム（カンマ区切り）
+        required: true
+        type: string
+        default: "windows-latest,ubuntu-22.04,macos-latest"
+      create_release:
+        description: "Create GitHub release" # GitHubリリースを作成するか
+        required: false
+        type: boolean
+        default: true
+      release_name:
+        description: "Release name (if creating release)" # リリース名
+        required: false
+        type: string
+        default: "App v__VERSION__"
+
+jobs:
+  build:
+    permissions:
+      contents: write # リリース作成のためwrite権限が必要
+    strategy:
+      fail-fast: false # どれか失敗しても他は継続
+      matrix:
+        include:
+          - platform: "windows-latest" # Windows用
+            args: ""
+            target: ""
+          - platform: "ubuntu-22.04" # Ubuntu用
+            args: ""
+            target: ""
+          - platform: "macos-latest" # macOS x86_64用
+            args: "--target x86_64-apple-darwin"
+            target: "x86_64-apple-darwin"
+          - platform: "macos-latest" # macOS Apple Silicon用
+            args: "--target aarch64-apple-darwin"
+            target: "aarch64-apple-darwin"
+
+    runs-on: ${{ matrix.platform }} # 各プラットフォームで実行
+
+    steps:
+      - name: Checkout repository # リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js # Node.jsセットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+          cache: "npm"
+
+      - name: Install Rust toolchain # Rustツールチェーンインストール
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target || '' }}
+
+      - name: Install system dependencies (Ubuntu only) # Ubuntuのみ依存パッケージインストール
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Install frontend dependencies # フロントエンド依存インストール
+        run: npm install
+
+      - name: Build and release Tauri app # Tauriアプリのビルド＆リリース
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: "."
+          includeDebug: ${{ github.event.inputs.build_type == 'debug' }}
+          includeRelease: ${{ github.event.inputs.build_type == 'release' }}
+          args: ${{ matrix.args }}
+          tagName: ${{ github.event.inputs.create_release && github.event.inputs.release_name || '' }}
+          releaseName: ${{ github.event.inputs.create_release && github.event.inputs.release_name || '' }}
+          releaseBody: "Built with workflow_dispatch trigger"
+          releaseDraft: true
